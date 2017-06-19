@@ -1,15 +1,9 @@
 let gulp = require('gulp');
-let awspublish = require('gulp-awspublish');
-let merge = require('merge-stream');
 let gutil = require('gulp-util');
-let rename = require('gulp-rename');
 let path = require('path');
 let fs = require('fs');
 let AWS = require('aws-sdk');
 let execSync = require('child_process').execSync;
-
-const publDir = './build/';
-const distDir = './dist/';
 
 let currentBranch;
 if (process.env.CI) { currentBranch = process.env.TRAVIS_BRANCH; }
@@ -59,95 +53,103 @@ function loadAwsParams() {
   return awsParams;
 }
 
-gulp.task('publish', function() {
-  // create a new publisher using S3 options
-  // http://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/S3.html#constructor-property
-  let awsParams = loadAwsParams();
-  let publisher = awspublish.create(awsParams, { cacheFileName: `awspublish_${env}_${currentBranch}.cache` });
+function addDeploymentTasks() {
+  gulp.task('publish', function() {
+    let rename = require('gulp-rename');
+    let merge = require('merge-stream');
+    let awspublish = require('gulp-awspublish');
 
-  let files = require('./publish-files.json');
+    // create a new publisher using S3 options
+    // http://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/S3.html#constructor-property
+    let awsParams = loadAwsParams();
+    let publisher = awspublish.create(awsParams, { cacheFileName: `awspublish_${env}_${currentBranch}.cache` });
 
-  let negations = files.reverse().slice(0,-1).reduce(
-    function(acc, next) {
-      newFilter = acc[0].concat(next.filter.map(f => { return '!'+f; }));
-      return [newFilter].concat(acc);
-    }, [[]]);
+    let files = require('./publish-files.json');
 
-  files = files.reverse().map((e,i) => {
-    e.filter = e.filter.concat(negations[i]);
-    return e;
+    let negations = files.reverse().slice(0,-1).reduce(
+      function(acc, next) {
+        newFilter = acc[0].concat(next.filter.map(f => { return '!'+f; }));
+        return [newFilter].concat(acc);
+      }, [[]]);
+
+    files = files.reverse().map((e,i) => {
+      e.filter = e.filter.concat(negations[i]);
+      return e;
+    });
+
+    let fileGroupPipes = [];
+    for (let fileGroup of files) {
+      let groupPipe = gulp.src(fileGroup.filter)
+
+      if (!isMasterBranch) {
+        groupPipe = groupPipe
+          .pipe(rename(function (filepath) {
+            filepath.dirname = path.join(branchDir, filepath.dirname);
+          })) }
+
+      groupPipe = groupPipe.pipe(publisher.publish(fileGroup.headers));
+
+      fileGroupPipes.push(groupPipe);
+    }
+
+    let buildPipe = merge.apply(this, fileGroupPipes)
+    if (isMasterBranch) {
+      buildPipe = buildPipe.pipe(publisher.sync(branchDir, [ /^branch\/.*\// ] )); }
+    else {
+      buildPipe = buildPipe.pipe(publisher.sync(branchDir)); }
+
+    buildPipe = buildPipe
+      .pipe(publisher.cache())
+      .pipe(awspublish.reporter());
+
+    return buildPipe;
+  });
+}
+
+function addBuildingTasks(publdir='./build/', distDir='./dist/') {
+  let rev = require('gulp-rev');
+  let revReplace = require('gulp-rev-replace');
+  let filter = require('gulp-filter');
+
+  gulp.task('revision-assets', ['clear-dist'], function() {
+    return gulp.src([publDir+'/fonts/*', publDir+'/images/**/*', publDir+'/images-minified/**/*', publDir+'/js/**/*.js'], {base: publDir})
+    .pipe(rev())
+    .pipe(gulp.dest(distDir))  // write rev'd assets to build dir
+    .pipe(rev.manifest())
+    .pipe(gulp.dest(distDir));
   });
 
-  let fileGroupPipes = [];
-  for (let fileGroup of files) {
-    let groupPipe = gulp.src(fileGroup.filter)
+  gulp.task('revreplace-css', ['revision-assets'], function() {
+    let manifest = gulp.src(distDir+'/rev-manifest.json');
 
-    if (!isMasterBranch) {
-      groupPipe = groupPipe
-        .pipe(rename(function (filepath) {
-          filepath.dirname = path.join(branchDir, filepath.dirname);
-        })) }
+    return gulp.src([publDir+'/css/*.css'])
+      .pipe(revReplace({manifest: manifest}))
+      .pipe(rev())
+      .pipe(gulp.dest(distDir+'/css'))
+      .pipe(rev.manifest({path: distDir+'/rev-manifest.json', base: distDir, merge: true}))
+      .pipe(gulp.dest(distDir))
+  });
 
-    groupPipe = groupPipe.pipe(publisher.publish(fileGroup.headers));
-
-    fileGroupPipes.push(groupPipe);
-  }
-
-  let buildPipe = merge.apply(this, fileGroupPipes)
-  if (isMasterBranch) {
-    buildPipe = buildPipe.pipe(publisher.sync(branchDir, [ /^branch\/.*\// ] )); }
-  else {
-    buildPipe = buildPipe.pipe(publisher.sync(branchDir)); }
-
-  buildPipe = buildPipe
-    .pipe(publisher.cache())
-    .pipe(awspublish.reporter());
-
-  return buildPipe;
-});
-
-let rev = require('gulp-rev');
-let revReplace = require('gulp-rev-replace');
-let filter = require('gulp-filter');
-
-gulp.task('revision-assets', ['clear-dist'], function() {
-  return gulp.src([publDir+'/fonts/*', publDir+'/images/**/*', publDir+'/images-minified/**/*', publDir+'/js/**/*.js'], {base: publDir})
-  .pipe(rev())
-  .pipe(gulp.dest(distDir))  // write rev'd assets to build dir
-  .pipe(rev.manifest())
-  .pipe(gulp.dest(distDir));
-});
-
-gulp.task('revreplace-css', ['revision-assets'], function() {
-  let manifest = gulp.src(distDir+'/rev-manifest.json');
-
-  return gulp.src([publDir+'/css/*.css'])
-    .pipe(revReplace({manifest: manifest}))
+  gulp.task('revision-js', function() {
+    return gulp.src([publDir+'/js/**/*.js'], {base: publDir})
     .pipe(rev())
-    .pipe(gulp.dest(distDir+'/css'))
-    .pipe(rev.manifest({path: distDir+'/rev-manifest.json', base: distDir, merge: true}))
     .pipe(gulp.dest(distDir))
-});
+    .pipe(rev.manifest({path: distDir+'/rev-manifest.json', base: distDir, merge: true}))
+    .pipe(gulp.dest(distDir));
+  });
 
-gulp.task('revision-js', function() {
-  return gulp.src([publDir+'/js/**/*.js'], {base: publDir})
-  .pipe(rev())
-  .pipe(gulp.dest(distDir))
-  .pipe(rev.manifest({path: distDir+'/rev-manifest.json', base: distDir, merge: true}))
-  .pipe(gulp.dest(distDir));
-});
+  gulp.task('revreplace-html', ['clear-dist', 'revision-js', 'revreplace-css'], function() {
+    let manifest = gulp.src(distDir+'/rev-manifest.json');
 
-gulp.task('revreplace-html', ['clear-dist', 'revision-js', 'revreplace-css'], function() {
-  let manifest = gulp.src(distDir+'/rev-manifest.json');
+    return gulp.src(publDir+'/**/*.html')
+    .pipe(revReplace({manifest: manifest}))
+    .pipe(gulp.dest(distDir))
+  });
 
-  return gulp.src(publDir+'/**/*.html')
-  .pipe(revReplace({manifest: manifest}))
-  .pipe(gulp.dest(distDir))
-});
+  gulp.task('clear-dist', function() {
+    if (fs.existsSync(distDir)) {
+      execSync('rm -R '+distDir) }
+  });
 
-gulp.task('clear-dist', function() {
-  if (fs.existsSync(distDir)) {
-    execSync('rm -R '+distDir) }
-});
-
-gulp.task('build-dist', ['revreplace-html']);
+  gulp.task('build-dist', ['revreplace-html']);
+}
