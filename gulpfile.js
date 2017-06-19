@@ -53,7 +53,7 @@ function loadAwsParams() {
   return awsParams;
 }
 
-function addDeploymentTasks() {
+function addDeploymentTasks(files) {
   gulp.task('publish', function() {
     let rename = require('gulp-rename');
     let merge = require('merge-stream');
@@ -63,8 +63,6 @@ function addDeploymentTasks() {
     // http://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/S3.html#constructor-property
     let awsParams = loadAwsParams();
     let publisher = awspublish.create(awsParams, { cacheFileName: `awspublish_${env}_${currentBranch}.cache` });
-
-    let files = require('./publish-files.json');
 
     let negations = files.reverse().slice(0,-1).reduce(
       function(acc, next) {
