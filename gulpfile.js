@@ -153,3 +153,5 @@ function addBuildingTasks(publdir='./build/', distDir='./dist/') {
 
   gulp.task('build-dist', ['revreplace-html']);
 }
+
+export { addDeploymentTasks, addBuildingTasks };
